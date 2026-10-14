@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-worker
+  namespace: ingest
+  labels:
+    modeswitch.example.io/enabled: "true"
+  annotations:
+    # Runs 3 in normal, 6 in peak, 1 in offpeak; 0 in maintenance/standby.
+    # Use "*=N" to set a default for unlisted modes.
+    # Annotate the workload, NOT the pod template (that would roll pods).
+    modeswitch.example.io/replicas: "normal=3,peak=6,offpeak=1"
+    # Optional: hold current replicas this long before scaling to 0.
+    # Leaving the zero mode within the window cancels the scale-down.
+    modeswitch.example.io/scale-to-zero-delay: "5m"
+spec:
+  # Creation-time value only. With RespectIgnoreDifferences, Argo uses Git's
+  # value on create and the live value thereafter. 0 avoids pods briefly
+  # starting before the controller applies the current mode.
+  replicas: 0
+  selector:
+    matchLabels: {app: ingest-worker}
+  template:
+    metadata:
+      labels: {app: ingest-worker}
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/example/ingest-worker:1.4.2

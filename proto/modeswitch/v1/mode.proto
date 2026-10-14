@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package modeswitch.v1;
+
+option go_package = "github.com/example/modeswitch/gen/modeswitch/v1;modev1";
+
+// Placeholder contract. Replace with your application's real proto and adapt
+// internal/modesource/grpc.go (only watch() touches generated types).
+service ModeService {
+  // The server MUST send the current mode immediately on subscribe,
+  // then one message on every change.
+  rpc WatchMode(WatchModeRequest) returns (stream ModeUpdate);
+}
+
+message WatchModeRequest {}
+
+message ModeUpdate {
+  string mode = 1;
+}
