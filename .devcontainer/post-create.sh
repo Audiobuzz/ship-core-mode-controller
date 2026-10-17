@@ -41,6 +41,20 @@ curl -fsSL -o /tmp/kubebuilder \
 sudo install -m 0755 /tmp/kubebuilder /usr/local/bin/kubebuilder
 rm -f /tmp/kubebuilder
 
+echo "== k9s -> /usr/local/bin"
+# Terminal UI for the kind clusters. The latest release, checked against the
+# checksums published with it.
+K9S_TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/derailed/k9s/releases/latest)"
+K9S_URL="https://github.com/derailed/k9s/releases/download/${K9S_TAG##*/}"
+K9S_ASSET="k9s_Linux_$(go env GOARCH).tar.gz"
+K9S_TMP="$(mktemp -d)"
+curl -fsSL -o "$K9S_TMP/$K9S_ASSET" "$K9S_URL/$K9S_ASSET"
+curl -fsSL -o "$K9S_TMP/checksums.sha256" "$K9S_URL/checksums.sha256"
+(cd "$K9S_TMP" && grep " $K9S_ASSET\$" checksums.sha256 | sha256sum -c --quiet -)
+tar -xzf "$K9S_TMP/$K9S_ASSET" -C "$K9S_TMP" k9s
+sudo install -m 0755 "$K9S_TMP/k9s" /usr/local/bin/k9s
+rm -rf "$K9S_TMP"
+
 echo "== npm globals"
 # codex: the second-opinion reviewer (.claude/tools/codex-review.sh).
 # Drop it if you will not use a second model family.

@@ -8,7 +8,7 @@ workloads and KubeVirt VMs to match the cluster's current mode.
 | [docs/design.md](docs/design.md) | The design specification |
 | [mode-operator/](mode-operator/) | Submodule: the Kubernetes operator ([Audiobuzz/mode-operator](https://github.com/Audiobuzz/mode-operator)) |
 | [mode-manager-stub/](mode-manager-stub/) | Submodule: a test stand-in for the mode manager, with a web page for setting the mode ([Audiobuzz/mode-manager-stub](https://github.com/Audiobuzz/mode-manager-stub)) |
-| [.devcontainer/](.devcontainer/) | Development container with Go, kubebuilder, kubectl, Helm, kind and Docker |
+| [.devcontainer/](.devcontainer/) | Development container with Go, kubebuilder, kubectl, Helm, kind, k9s and Docker |
 | [reference/modeswitch.zip](reference/modeswitch.zip) | The earlier gRPC prototype, kept until mode-operator v1 lands |
 
 ## Getting the code
