@@ -55,6 +55,12 @@ tar -xzf "$K9S_TMP/$K9S_ASSET" -C "$K9S_TMP" k9s
 sudo install -m 0755 "$K9S_TMP/k9s" /usr/local/bin/k9s
 rm -rf "$K9S_TMP"
 
+echo "== shellcheck (apt)"
+# For linting this repo's scripts by hand and in the editor. mode-operator's
+# make shellcheck downloads its own pinned copy, as its CI does.
+sudo apt-get update -qq
+sudo apt-get install -y -qq shellcheck
+
 echo "== npm globals"
 # codex: the second-opinion reviewer (.claude/tools/codex-review.sh).
 # Drop it if you will not use a second model family.
