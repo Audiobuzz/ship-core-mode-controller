@@ -84,7 +84,7 @@ Confirmed with the user:
   field manager (which ArgoCD's ignore rules key on) and metric prefix
   `mode_operator_`. The API group is `mode.bitasylum.org`, which prefixes the
   label and annotations on every workload. The operator has its own repo,
-  `github.com/Audiobuzz/mode-operator`, which is also its Go module path.
+  `github.com/bitasylum/mode-operator`, which is also its Go module path.
   Change any of these only before the first deploy.
 - Repos: `ship-core-mode-controller` is the parent, holding the devcontainer
   and the design docs. `mode-operator` and `mode-manager-stub` (§9.5) are
@@ -1233,7 +1233,7 @@ both in one window.
 
 ```
 PROJECT                           (Kubebuilder project file)
-go.mod                            (module github.com/Audiobuzz/mode-operator)
+go.mod                            (module github.com/bitasylum/mode-operator)
 api/
   v1alpha1/
     groupversion_info.go
@@ -1286,7 +1286,7 @@ README.md
 ### 9.2 Scaffolding
 
 ```sh
-kubebuilder init --domain bitasylum.org --repo github.com/Audiobuzz/mode-operator
+kubebuilder init --domain bitasylum.org --repo github.com/bitasylum/mode-operator
 kubebuilder create api --group mode --version v1alpha1 --kind ClusterMode \
   --namespaced=false --resource --controller
 kubebuilder create api --group mode --version v1alpha1 --kind ClusterModeDefinition \
