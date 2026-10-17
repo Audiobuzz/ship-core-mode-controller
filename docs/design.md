@@ -25,8 +25,8 @@ Revision: v2, 2026-10-17. Replaces v1.
 - **The controller is a Kubebuilder project, installed with a Helm chart.**
   Nothing in the design blocks OLM later (§9.4).
 - **The CRDs are the only interface with the mode manager**, which is developed
-  in another repo. This repo ships no mode-manager code. §6 is a contract the
-  mode manager must meet, with a recommended design for its persistence.
+  in another repo. This project ships none of the mode manager's code. §6 is
+  a contract the mode manager must meet, with a recommended design for its persistence.
 - **Maintainers may edit the mode by hand.** The controller applies a manual
   edit like any other change, status shows that the mode was set by hand,
   and the mode manager adopts the edit.
@@ -63,8 +63,8 @@ labels, RBAC and metrics are designed so that more mode managers, each with its
 own ClusterMode (for example per namespace or per group of applications), can
 be added later without breaking changes (§13).
 
-This repo holds the controller and the CRDs. The mode manager is developed in
-another repo, and the ClusterMode CRD is the only interface between the two:
+The `mode-operator` repo holds the controller and the CRDs. The mode manager
+is developed in another repo, and the ClusterMode CRD is the only interface between the two:
 neither imports the other's code. They run as separate Deployments with
 separate ServiceAccounts.
 
@@ -83,9 +83,12 @@ Confirmed with the user:
 - Names. The component is `mode-operator`: its Deployment, Helm chart, image,
   field manager (which ArgoCD's ignore rules key on) and metric prefix
   `mode_operator_`. The API group is `mode.bitasylum.org`, which prefixes the
-  label and annotations on every workload. The repo is renamed to match, so
-  the Go module path is `github.com/Audiobuzz/mode-operator`. Change any of
-  these only before the first deploy.
+  label and annotations on every workload. The operator has its own repo,
+  `github.com/Audiobuzz/mode-operator`, which is also its Go module path.
+  Change any of these only before the first deploy.
+- Repos: `ship-core-mode-controller` is the parent, holding the devcontainer
+  and the design docs. `mode-operator` and `mode-manager-stub` (§9.5) are
+  submodules of it, each with its own history, CI and releases.
 - The mode manager is developed in another repo. The ClusterMode CRD is its
   only interface with this project.
 - The allowed modes are defined in a ClusterModeDefinition that only admins
@@ -155,8 +158,9 @@ Confirmed with the user:
   build or test it.
 - An OLM bundle. v1 ships a Helm chart, and nothing in the design blocks OLM
   later (§9.4).
-- Mode-manager code. This repo specifies what the mode manager must do (§6)
-  but ships none of it.
+- Mode-manager code. This project specifies what the mode manager must do
+  (§6) but ships none of it. The stub in §9.5 is a test tool, not a mode
+  manager.
 - Maintainer overrides that outlast the mode manager's next mode change
   (§13).
 
@@ -444,8 +448,8 @@ them. The README shows the override command:
 ## 6. Mode manager contract
 
 The mode manager is developed in another repo, and the ClusterMode CRD is its
-only interface with this project. This repo ships no mode-manager code, and the
-mode manager imports no Go code from this repo. This section covers what the
+only interface with this project. This project ships none of the mode
+manager's code, and the mode manager imports no Go code from it. This section covers what the
 mode manager must do (§6.1), what it can rely on (§6.2), and a recommended
 design for its persistence (§6.3). Its gRPC API is unchanged; the changes the
 contract needs are made in the mode manager's repo.
@@ -516,7 +520,7 @@ contract needs are made in the mode manager's repo.
 
 ### 6.3 Recommended persistence design
 
-This is not built in this repo. It is the design reviewed for this project,
+This is not built in this project. It is the design reviewed for it,
 and the mode-manager team can adopt it as it stands.
 
 #### Fingerprint ConfigMap
@@ -599,12 +603,12 @@ Keep the decision in step 3 a pure function, so the table can be unit-tested.
 
 ### 6.4 RBAC (mode manager ServiceAccount)
 
-This repo's Helm chart ships the ClusterMode rules as a ClusterRole,
+mode-operator's Helm chart ships the ClusterMode rules as a ClusterRole,
 `mode-operator-clustermode-writer`, limited to the ClusterMode names listed in the
 chart's values (`default` in v1), because they belong to the CRD. The mode
 manager's own chart binds its ServiceAccount to that role and grants the rest.
 
-From this repo's chart:
+From mode-operator's chart:
 - `clustermodes`: `create` (Kubernetes can't limit `create` by name), and
   `get`, `list`, `watch`, `update`, `patch` limited by `resourceNames` to its
   own ClusterMode. To list or watch one named object under `resourceNames`,
@@ -1086,9 +1090,17 @@ with one implementation per kind. Each implementation:
    doesn't honour `managedFieldsManagers` during sync, use per-Application
    `ignoreDifferences` scoped by `name` with `jsonPointers`.
 
-## 9. Project layout
+## 9. Repositories and project layout
 
-### 9.1 Layout (Kubebuilder go/v4)
+There are three repos. `ship-core-mode-controller` is the parent: it holds the
+devcontainer, this document and the prototype for reference, and has the other
+two as git submodules. `mode-operator` holds the controller (§9.1 to §9.4), and
+`mode-manager-stub` holds a test stand-in for the mode manager (§9.5). Each
+submodule builds, tests and releases on its own, with nothing from the parent.
+Once both contain Go modules, a `go.work` in the parent lets editor tooling see
+both in one window.
+
+### 9.1 mode-operator layout (Kubebuilder go/v4)
 
 ```
 PROJECT                           (Kubebuilder project file)
@@ -1135,7 +1147,7 @@ Dockerfile
 README.md
 ```
 
-- `config/mode-manager/rbac/` is the only mode-manager artifact in this repo:
+- `config/mode-manager/rbac/` is the only mode-manager artifact in mode-operator:
   the ClusterMode permissions its install needs (§6.4).
 
 ### 9.2 Scaffolding
@@ -1151,9 +1163,9 @@ kubebuilder create api --group mode --version v1alpha1 --kind ClusterModeDefinit
 Then add the workload reconcilers by hand in `internal/controller`, and trim
 the scaffolded editor role into the maintainer role (§5.6).
 
-### 9.3 What happens to the current repo contents
+### 9.3 What happens to the prototype
 
-The repo currently holds the gRPC prototype, which is also in `modeswitch.zip`.
+The gRPC prototype is kept in the parent repo as `reference/modeswitch.zip`.
 This document is authoritative where the two differ.
 
 - **Keep and adapt:**
@@ -1170,7 +1182,7 @@ This document is authoritative where the two differ.
 - **Remove:** `internal/modesource`, `proto/`, the `generate` target for
   protobuf, the gRPC and protobuf dependencies, `Broadcaster`, `ModeState`, and
   the `--modes`, `--mode-server*` and `--resync-interval` flags.
-  `modeswitch.zip` can go once v2 lands.
+  `reference/modeswitch.zip` can go once mode-operator v1 lands.
 
 ### 9.4 Packaging: Helm now, OLM later
 
@@ -1200,6 +1212,42 @@ To keep OLM possible later without a redesign:
   it so that OLM can manage its certificates, as Operator SDK documents.
 - Release the image, chart and CRD together under one semantic version, which
   OLM's upgrade graph needs.
+
+### 9.5 Stub mode manager (`mode-manager-stub`)
+
+A small test tool in its own repo. It stands in for the real mode manager so
+that mode-operator can be exercised end to end. It meets the parts of the
+contract in §6.1 that the operator relies on, and nothing more.
+
+- **Web page.** One page, served with Go's `net/http` and `html/template`,
+  with no JavaScript framework. It shows:
+  - a select box listing the definition's `spec.modes`; choosing one writes
+    `spec.mode`
+  - the current `spec.mode` and `status.modeSetBy`, refreshed when they
+    change, so a maintainer's manual edit shows up (rule 9)
+  - the ClusterMode's conditions, workload counts, replica sums and
+    unsettled list
+  - a free-text field that writes any mode, to check that the API server
+    rejects modes outside the definition (§5.2). API errors are shown as
+    returned.
+- **Writes** follow rules 1 and 4: server-side apply with field manager
+  `mode-manager` and `Force: true`, setting `spec.mode`, `spec.definition`
+  and the `writer` label (`mode-manager-stub`). It creates the ClusterMode if
+  it's missing, and never writes `status`.
+- **Flags:** the ClusterMode name (default `default`), the definition name
+  (default `standard`) and the listen address.
+- **Generic objects only.** It uses client-go's dynamic client, not
+  mode-operator's Go types, so it uses the CRDs exactly as the real mode
+  manager will, and neither repo depends on the other.
+- **If the CRDs are missing,** the page says so and keeps checking (rule 8).
+- **Left out on purpose:** gRPC, the persistence design in §6.3, and leader
+  election. It runs one replica with `strategy: Recreate` (rule 5).
+- **Test clusters only.** The page has no login. Its Service is ClusterIP,
+  reached with `kubectl port-forward`; never expose it through an Ingress.
+- **RBAC:** its ServiceAccount is bound to the writer ClusterRole from
+  mode-operator's chart (§6.4), which already includes read access to
+  ClusterModeDefinitions. It needs nothing else.
+- **Packaging:** a distroless, non-root image and a small Helm chart.
 
 ## 10. Tech stack
 
@@ -1318,6 +1366,8 @@ Write these first, because they prove the write-time check in §5.2:
   the only owner of `status`.
 
 ### Manual checklist (README)
+- Until the real mode manager is ready, use the stub (§9.5) to set modes for
+  these checks.
 - After an Argo sync, the Application is `Synced` with controller-chosen
   replicas.
 - `kubectl get clustermode` shows the mode, conditions and counts, and
@@ -1358,7 +1408,7 @@ Write these first, because they prove the write-time check in §5.2:
 - [ ] Nothing in the controller references gRPC or a compiled-in mode list;
       mode names come only from ClusterModeDefinitions. Everything
       listed under "Remove" in §9.3 is gone.
-- [ ] Nothing in this repo imports mode-manager code; the CRDs are the only
+- [ ] Nothing in mode-operator imports mode-manager code; the CRDs are the only
       interface §6 relies on.
 - [ ] The README documents the workload contract, the mode-manager contract,
       how to add and remove modes, maintainer overrides, ClusterMode status
@@ -1376,8 +1426,8 @@ None of these needs a breaking change.
 | Future need | How to add it |
 |---|---|
 | More mode managers, each with its own ClusterMode | Deploy another mode manager that meets §6.1, with its own ClusterMode name, using a shared or its own ClusterModeDefinition, and its own fingerprint ConfigMap if it uses §6.3. No controller change. |
-| Mode manager with more than one replica | Leader election with a Lease; only the leader writes. The contract already requires one writer at a time (§6.1, rule 5), so nothing in this repo changes. |
-| Mode manager moves into this repo | Turn the design in §6.3 into a shared Go package at that point. |
+| Mode manager with more than one replica | Leader election with a Lease; only the leader writes. The contract already requires one writer at a time (§6.1, rule 5), so nothing in mode-operator changes. |
+| Mode manager moves into this project | Turn the design in §6.3 into a shared Go package at that point. |
 | Maintainer override that lasts until cleared | An annotation on the ClusterMode, for example `mode.bitasylum.org/hold: "true"`, that tells the mode manager not to write until it is removed. The controller doesn't change. |
 | Strictly one mode manager per ClusterMode | An admin creates the ClusterMode objects, possibly from Git with Argo ignoring `spec.mode` through `managedFieldsManagers: [mode-manager]`. The mode managers lose `create`, so `resourceNames` alone enforces one mode manager per object. Alternatively, an admission policy checks the `writer` label against the requesting ServiceAccount. |
 | A mode manager confined to one namespace | Add a namespaced `Mode` kind and a label `mode.bitasylum.org/mode` that resolves in the workload's namespace. |
