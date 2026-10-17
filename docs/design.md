@@ -977,7 +977,8 @@ Generated from `+kubebuilder:rbac` markers.
 - `events` (`events.k8s.io`): `create`, `patch`. controller-runtime's event
   recorder writes `events.k8s.io/v1` Events.
 - `leases` (own namespace): `get`, `list`, `watch`, `create`, `update`,
-  `patch`, `delete`
+  `patch`, `delete`, and core `events` there for leadership changes. The
+  ConfigMap rule Kubebuilder scaffolds for leader election isn't needed.
 
 The controller has no write access to ClusterModeDefinitions, ClusterMode
 `spec`, ConfigMaps or Nodes.
@@ -1166,7 +1167,8 @@ config/
   argocd/argocd-cm-patch.yaml
   examples/app-deployment.yaml
   examples/argocd-application.yaml
-dist/chart/                       (Helm chart, generated from config/; §9.4)
+dist/chart/                       (Helm chart; CRDs and role rules synced from config/; §9.4)
+hack/sync-chart.sh, test-chart.sh
 Makefile                          (Kubebuilder targets: manifests, generate, fmt, vet, test, build, docker-build)
 Dockerfile
 README.md
@@ -1211,20 +1213,49 @@ This document is authoritative where the two differ.
 
 ### 9.4 Packaging: Helm now, OLM later
 
-v1 is installed with a Helm chart, generated from `config/` with Kubebuilder's
-Helm plugin, so the CRDs and RBAC in the chart always match controller-gen's
-output. The chart contains:
-- both CRDs, in `templates/` with `helm.sh/resource-policy: keep` (§5.5), behind
-  a `crds.install` value that defaults to true
-- the controller Deployment, ServiceAccount, RBAC and leader-election Role,
-  with the flags exposed as values, for example `settleTimeout: 10m`
-- the maintainer and viewer ClusterRoles (§5.6), with an optional binding for
-  the groups in `maintainers.groups`
-- the mode-manager writer ClusterRole for the names in `clusterModes` (§6.4)
-- the definition admin ClusterRole (§5.6), and optionally ClusterModeDefinitions
-  from the `definitions` value, so they are kept in Git with the rest of the
-  install
-- optionally, a ServiceMonitor for the metrics
+v1 is installed with a Helm chart in `dist/chart/`. The CRDs and the rules of
+every role in it are copied from `config/` by `hack/sync-chart.sh`, which
+`make manifests` runs, so they always match controller-gen's output; `make
+chart-check` fails in CI if they drift. The rest of the chart is maintained by
+hand. Kubebuilder's Helm plugin was the plan, but it only works with
+Kubebuilder's default object names (`controller-manager` and so on): with the
+names below it merged objects into one file and dropped its values. Its first
+output was used as a starting point.
+
+Objects are named `<release>-<component>`, which is `mode-operator-controller`
+for the Deployment, ServiceAccount and ClusterRole with the default release
+name. Kubebuilder's `manager` names were dropped because they read as
+belonging to the mode manager.
+
+The chart contains:
+- both CRDs, in `templates/` with `helm.sh/resource-policy: keep` (§5.5),
+  behind `crds.install` and `crds.keep` values that default to true
+- the controller Deployment (2 replicas, spread over nodes, with a
+  PodDisruptionBudget), ServiceAccount, RBAC and leader-election Role, with
+  the flags exposed as values, for example `controller.settleTimeout: 10m`
+- the maintainer and viewer ClusterRoles (§5.6), with optional bindings for
+  the groups in `rbac.maintainers.groups` and `rbac.viewers.groups`
+- the mode-manager writer ClusterRole for the names in
+  `modeManager.clusterModes` (§6.4)
+- the definition admin ClusterRole (§5.6), with an optional binding for
+  `rbac.definitionAdmins.groups`, and optionally ClusterModeDefinitions from
+  the `definitions` value, so they are kept in Git with the rest of the
+  install. They carry `helm.sh/resource-policy: keep`, so they also stay when
+  removed from the values. `helm install` can't
+  create them in the same release as the CRDs, because it checks every
+  object's kind first, so a plain Helm install adds them with a later `helm
+  upgrade`. Argo CD applies CRDs first, and the definitions carry
+  `SkipDryRunOnMissingResource` so a single sync works.
+- optionally, a ServiceMonitor and a NetworkPolicy for the metrics, and a TLS
+  Secret (`metrics.certSecret`) to serve metrics with instead of a
+  self-signed certificate
+- Argo CD renders charts with `helm template` and ignores Helm's
+  `resource-policy: keep`. Under `crds.keep`, the CRDs, and the definitions
+  always, also carry Argo CD's `Prune=false,Delete=false` sync options, so
+  deleting the Argo CD Application can't delete them
+- the chart refuses to render more than one replica without leader election
+- `hack/test-chart.sh` (`make test-chart`) installs the chart on a new kind
+  cluster and checks install, upgrade, a mode change and uninstall
 
 To keep OLM possible later without a redesign:
 - `config/` stays the source of truth. Operator SDK builds an OLM bundle from
@@ -1282,7 +1313,8 @@ contract in §6.1 that the operator relies on, and nothing more.
 - controller-gen for CRDs, deepcopy and RBAC markers
 - envtest (via setup-envtest) for integration tests
 - `prometheus/client_golang` for metrics
-- Helm 3 for packaging (§9.4)
+- Helm for packaging (§9.4), tested with Helm 4.3; Helm 3.8 or later should
+  work
 - KubeVirt kinds are handled as unstructured objects. Don't import
   `kubevirt.io/api`.
 - No other new dependencies. The gRPC and protobuf dependencies are removed.
@@ -1460,6 +1492,7 @@ None of these needs a breaking change.
 | Protect definitions in use | A finalizer that blocks deleting a ClusterModeDefinition while a ClusterMode uses it. |
 | Controller-assisted offboarding | A release path that hands `spec.replicas` ownership back, replacing the manual procedure in §7.8. |
 | A per-VM run strategy | An optional annotation, for example `mode.bitasylum.org/run-strategy: RerunOnFailure`, for VMs that should stay off after shutting themselves down. VMs without it keep `Always`. |
+| Limit what the controller can change | An optional ValidatingAdmissionPolicy (GA in Kubernetes 1.30) that lets the controller's ServiceAccount change only `spec.replicas`, `spec.runStrategy` and the `mode.bitasylum.org/` annotations of workloads. Its RBAC allows any patch, so this would contain a compromised controller. |
 | Other kinds, such as VirtualMachineInstanceReplicaSet | Another implementation of the per-kind interface (§7.9). |
 | Delays on non-zero scale-downs, such as 6 to 3 | Add a separate optional annotation, for example `scale-down-delay`, with its own controller-owned pending marker. `scale-to-zero-delay` keeps its meaning, so existing workloads are unaffected. |
 | OLM distribution | Generate an Operator SDK bundle from `config/` and the `PROJECT` file. §9.4 lists the choices that keep this open. |
