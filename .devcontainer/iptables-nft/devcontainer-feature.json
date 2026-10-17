@@ -1,0 +1,9 @@
+{
+  "id": "iptables-nft",
+  "version": "1.0.0",
+  "name": "Use nftables-backed iptables",
+  "description": "Points iptables and ip6tables at their nft backends. The docker-in-docker feature selects iptables-legacy, and on host kernels without the legacy nat table dockerd then fails to start.",
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/docker-in-docker"
+  ]
+}
