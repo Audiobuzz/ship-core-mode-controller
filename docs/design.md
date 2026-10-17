@@ -1031,6 +1031,14 @@ Status reconciler:
   `name`, `from`, `to`.
 - The container runs distroless and nonroot, with a read-only root
   filesystem, all capabilities dropped, and the RuntimeDefault seccomp profile.
+  The binary is static (`CGO_ENABLED=0`), built with `-trimpath`; PIE isn't
+  used, because a static PIE needs cgo and distroless static has no loader.
+- The metrics endpoint accepts TLS 1.3 only. Its clients are metrics
+  scrapers, and Go's post-quantum key exchange is TLS 1.3 only.
+- CI builds, tests and scans with the Go version of the Dockerfile's builder
+  image (`hack/build-go-version.sh`), not go.mod's minimum, and runs
+  `govulncheck` on every push and weekly. Dependabot updates Go modules, the
+  base images (Go patch releases only) and Actions.
 
 ### 7.7 RBAC (controller ServiceAccount)
 
