@@ -952,7 +952,8 @@ Generated from `+kubebuilder:rbac` markers.
 - `virtualmachines` (`kubevirt.io`) and `virtualmachinepools`
   (`pool.kubevirt.io`): `get`, `list`, `watch`, `patch`. These rules are
   installed even without KubeVirt (§7.9).
-- `events` (core): `create`, `patch`
+- `events` (`events.k8s.io`): `create`, `patch`. controller-runtime's event
+  recorder writes `events.k8s.io/v1` Events.
 - `leases` (own namespace): `get`, `list`, `watch`, `create`, `update`,
   `patch`, `delete`
 
@@ -1118,6 +1119,8 @@ internal/
     workload_controller.go        (one reconciler per workload kind)
     kubevirt_discovery.go         (optional kinds; restart when they change, §7.9)
     decide.go                     (pure, §7.3)
+    annotations.go                (parsed user annotations, shared with summarize)
+    setup.go                      (cache filter and field indexes, §7.5)
     clustermode_controller.go     (status reconciler)
     summarize.go                  (pure, §7.4)
     metrics.go
