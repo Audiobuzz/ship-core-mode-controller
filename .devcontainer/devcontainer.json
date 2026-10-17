@@ -10,7 +10,7 @@
     "source=${localEnv:HOME}/.codex,target=/home/vscode/.codex,type=bind,consistency=cached",
     "source=platformio-${devcontainerId},target=/home/vscode/.platformio,type=volume"
   ],
-  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  // "postCreateCommand": "bash .devcontainer/post-create.sh",
   "customizations": {
     "vscode": {
       "extensions": [
