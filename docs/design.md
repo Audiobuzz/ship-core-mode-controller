@@ -152,8 +152,8 @@ Confirmed with the user:
   VirtualMachinePool (§13).
 - Changing the mode manager's gRPC API. The mode-manager changes that the
   contract needs (§6) are made in its own repo.
-- Tracking image rollouts or terminating pods in status. Status tracks replica
-  counts only.
+- Tracking image rollouts in status. Status tracks replica counts and pods
+  still to stop (§7.4).
 - Running more than one mode manager. The design allows it (§13); v1 doesn't
   build or test it.
 - An OLM bundle. v1 ships a Helm chart, and nothing in the design blocks OLM
@@ -237,6 +237,10 @@ spec:
 status:                                  # written by mode-operator only
   observedGeneration: 7
   modes: [normal, peak, offpeak, maintenance, standby]   # copy of the definition's modes (§5.2)
+  defaultMode: standby                   # copy of the definition's defaultMode (§5.2)
+  transitions:                           # copy of the definition's transitions, when it has them (§5.2)
+    - from: peak
+      to: [normal]
   mode: peak                             # the mode this status describes
   modeChangedAt: "2026-10-17T09:12:44Z"  # when the controller first saw this mode
   modeSetBy: mode-manager                # field manager that set spec.mode (§5.4)
@@ -302,6 +306,29 @@ status:                                  # written by mode-operator only
   first (§11).
 - `status.modes` has at most 32 items, matching the definition, which keeps
   the rule within the API server's cost budget.
+- **Transitions (§5.3).** The controller also copies the definition's
+  `transitions` and `defaultMode` into `status.transitions` and
+  `status.defaultMode`. Two more root rules apply while `status.transitions`
+  is set, and both let a change of `spec.mode` to `status.defaultMode`
+  through:
+  - the change must be listed:
+    `self.status.transitions.exists(t, t.from == oldSelf.spec.mode && self.spec.mode in t.to)`
+  - the mode being left must be Ready: `self.status.mode == oldSelf.spec.mode`
+    and the `Ready` condition is True. `status.conditions` has at most 8
+    items, for the cost budget.
+- **The Ready check needs an admission policy too.** CRD rules can't read
+  `metadata.generation`, so they can't tell whether the status was computed
+  from the latest spec. Matching `status.mode` to the old `spec.mode` isn't
+  enough: a ClusterMode moved from a Ready `standby` to `normal` and straight
+  back, which the default-mode exemption allows, still shows `standby` Ready
+  from before, and could move on before the controller writes status. A
+  ValidatingAdmissionPolicy, `mode-operator-transitions`, shipped in
+  `config/admission/` and the chart, repeats the Ready check and also
+  requires `oldObject.status.observedGeneration ==
+  oldObject.metadata.generation`. Its match conditions limit it to updates
+  that change `spec.mode` while `status.transitions` is set. The CRD rule
+  stays, so an install with only the CRDs keeps the weaker check.
+  ValidatingAdmissionPolicy is GA from Kubernetes 1.30, the chart's minimum.
 - A CEL rule at the root enforces `size(self.metadata.name) <= 63`, so every
   name is a valid label value. There is no singleton rule.
 - All `status` fields are optional. A new object has an empty status until the
@@ -366,6 +393,21 @@ spec:
   there is no mode to restore: when it first creates the ClusterMode, after a
   full cluster reboot, and when the stored mode is no longer allowed (§6.1,
   rule 6, and §6.3).
+- **`spec.transitions` (optional)** makes the modes a state machine: a list
+  of rules, one per `from` mode, each with the modes it may move `to`. With
+  it set, a ClusterMode may move from one mode to another only if the rule
+  for the mode it is leaving lists the new one, and only once the mode it is
+  leaving is Ready (§5.2). A mode with no rule can only be left for
+  `defaultMode`. Moving to `defaultMode` is always allowed, whatever the
+  current mode and whether or not it is Ready, so the mode manager's reset
+  after a full cluster reboot (§6.1, rule 6) always works, and a maintainer
+  always has a way out of a stuck mode. Without `transitions`, any mode may
+  follow any other, at any time. A CEL rule checks that every mode named is in
+  `spec.modes`; the list is a map keyed by `from`, so each mode has one rule.
+  Another requires a rule for `defaultMode`, since a ClusterMode that resets
+  to it could otherwise never leave it, and the list has at least one rule,
+  since an empty list would otherwise mean no restrictions at all. The mode
+  manager plans paths of several steps itself.
 - The definition has no status in v1, and the controller never writes it.
 - Several ClusterModes can use one definition, for example when a second mode
   manager handles another group of applications (§13).
@@ -429,9 +471,10 @@ Changing the list:
   Kubebuilder's `make undeploy` and `make uninstall` do delete them.
 - The controller owns API version changes (v1alpha1 → v1beta1), including
   conversion. The mode manager depends only on the CRDs, so keep the fields
-  it uses (`spec.mode`, `spec.definition`, and the definition's `spec.modes`
-  and `spec.defaultMode`) unchanged across versions, and keep serving every
-  version it uses until it has moved to a newer one.
+  it uses unchanged across versions: `spec.mode`, `spec.definition`,
+  `status.mode`, `status.observedGeneration` and the `Ready` condition, and
+  the definition's `spec.modes`, `spec.defaultMode` and `spec.transitions`.
+  Keep serving every version it uses until it has moved to a newer one.
 
 ### 5.6 Maintainer access
 
@@ -481,7 +524,12 @@ contract needs are made in the mode manager's repo.
    also rejects a mode outside the definition (§5.2), so a mismatch shows up
    as a failed write under rule 2, never as a wrong mode. The mode manager
    can't change the definition; §5.3 gives the order for adding and removing
-   modes.
+   modes. If the definition has `transitions`, move only along them, and only
+   once the ClusterMode's `status.observedGeneration` equals its
+   `metadata.generation`, `status.mode` is the current mode and its `Ready`
+   condition is True. Plan paths of several steps as a series of such moves:
+   with the README's example rules, peak → standby → maintenance. A move to
+   `spec.defaultMode` is always allowed, including the reset in rule 6.
 4. **Never write `status`**, or any other field of the ClusterMode, and don't
    revert a maintainer's manual edit except by making a mode change.
 5. **Run one writer at a time.** The mode manager is a single replica today.
@@ -513,7 +561,13 @@ contract needs are made in the mode manager's repo.
 - The controller never writes ClusterMode `spec`. Only the mode manager and
   maintainers do (§5.4).
 - Nobody but admins changes the ClusterModeDefinition. The mode manager can
-  watch it to pick up changes.
+  watch it to pick up changes, including its `transitions`.
+- Under `transitions`, the API server rejects a move that isn't allowed yet,
+  and the mode manager sees a failed write under rule 2. With the admission
+  policy installed (§5.2), a Ready status counts only once it was computed
+  from the latest spec. One window is left: after a full cluster reboot, the
+  status from before the reboot counts until the controller's first status
+  write, because nothing has changed the generation (§7.8).
 - The fields it uses keep their meaning in every API version, and a version
   it uses stays served until it has moved off it (§5.5).
 - Mode names come only from ClusterModeDefinitions, so adding a mode needs a
@@ -794,15 +848,27 @@ Check the states in this order; the first match wins.
 | `Pending` | The mode wants 0 and `zero-pending-since` is set: the workload is waiting out its scale-to-zero delay. |
 | `Applying` | The count field doesn't hold the value the mode wants, or `applied-mode` differs from `spec.mode`. The controller hasn't written the workload yet; this normally lasts seconds. |
 | `Stalled` | The workload hasn't reached its count (as for `Scaling`), and more than its settle timeout (the `settle-timeout` annotation, or `--settle-timeout`) has passed since `replicas-changed-at`, or since `status.modeChangedAt` if that annotation is absent. If the controller has seen the workload `Settled` since then, the timeout runs instead from when it first saw it short again (see below). |
-| `Scaling` | The count is applied, but the workload hasn't reached it yet. What "reached" means depends on the kind (§7.9); for a Deployment or StatefulSet, the pods are ready and its `status` is up to date. |
+| `Scaling` | The count is applied, but the workload hasn't reached it yet. What "reached" means depends on the kind (§7.9); for a Deployment or StatefulSet, the pods are ready, none is still to stop, and its `status` is up to date. |
 | `Settled` | None of the above: the count is applied and the workload has reached it. |
 
 - A workload with an invalid delay that isn't blocked, because its mode
   doesn't want 0, is counted in its normal state. The error still counts in
   `invalidAnnotations` and sets `Degraded`.
-- `Settled` compares replica counts only. It doesn't track image rollouts, and
-  a scale-down counts as settled once the workload's status reports the new
-  count, even if pods are still terminating.
+- `Settled` compares replica counts only, and doesn't track image rollouts.
+  A workload is settled only while none of its pods is still to stop, so a
+  scale-down settles once its pods have gone, not just once they stop being
+  counted. A StatefulSet keeps terminating pods in `status.replicas` until
+  they have gone. A Deployment leaves them out and reports them in
+  `status.terminatingReplicas` (a beta field, on by default in recent
+  Kubernetes), which must be 0; on a cluster without that field, a
+  Deployment's scale-down settles once its count drops. A pod can take up to
+  its `terminationGracePeriodSeconds` to stop, so workloads that stop slowly
+  need a longer `settle-timeout`. Status alone can't tell a scale-down from
+  any other pod shutting down, so evictions, rollouts and pods stuck on a
+  lost node count too (§7.8).
+- The message for a workload with pods still to stop shows the ready count
+  capped at `desired`, because a StatefulSet counts its ready pods above the
+  count too: "3 of 3 replicas ready; 2 pods still to stop".
 - A workload that falls short of its count after staying `Settled` for at
   least a minute, because of an image rollout or a crashed pod, gets its whole
   settle timeout from that moment, not from the last mode change. A shorter
@@ -870,10 +936,13 @@ Check the states in this order; the first match wins.
 - Set `status.modeSetBy` to the field manager that owns `spec.mode` in
   `managedFields`: `mode-manager` normally, or the maintainer's tool after a
   manual edit.
-- Copy the definition's `spec.modes` into `status.modes`, which the CRD rule
-  in §5.2 checks changes of `spec.mode` against. Update the copy whenever the
-  definition changes. If the definition is deleted, keep the last copy, so
-  writes are still checked against the last known list.
+- Copy the definition's `spec.modes`, `spec.defaultMode` and
+  `spec.transitions` into `status.modes`, `status.defaultMode` and
+  `status.transitions`, which the CRD rules and admission policy in §5.2
+  check changes of `spec.mode` against. Update the copies whenever the
+  definition changes; a definition that drops its transitions removes
+  `status.transitions`. If the definition is deleted, keep the last copies,
+  so writes are still checked against the last known rules.
 - Write only when the computed status differs from the stored one. Use
   `meta.SetStatusCondition`, so `lastTransitionTime` changes only when a
   condition's status changes.
@@ -925,7 +994,7 @@ Status reconciler:
   switches ClusterMode updates both. A workload whose label is removed leaves
   the filtered cache as a delete event, which updates its old ClusterMode.
 - Watch `ClusterModeDefinition`, mapping it to the ClusterModes that use it,
-  so their `status.modes` copy stays current.
+  so their copies of its modes, default mode and transitions stay current.
 - Set `MaxConcurrentReconciles` to 2.
 
 ### 7.6 Operational
@@ -1007,6 +1076,34 @@ The controller has no write access to ClusterModeDefinitions, ClusterMode
   write `spec.replicas`. v1 does not detect this.
 - **KubeVirt:** see §7.9 for `virtctl start` and `stop`, paused VMs, and VMs
   that belong to a pool.
+- **Pods stuck terminating:** a pod on a node that has gone down stays
+  terminating until the node returns, its Node object is deleted, or someone
+  force-deletes the pod. Its workload stays unsettled, goes `Stalled`, and
+  makes the ClusterMode `Degraded`. With `transitions`, `Ready` stays False,
+  so only the default mode can be reached until the pod has gone. A
+  StatefulSet already behaved this way, because it doesn't replace such a
+  pod.
+- **Ready while the controller isn't writing status:** the admission policy
+  (§5.2) proves only that the status was computed from the latest spec, not
+  that it still reflects the workloads. While the controller is down, or
+  after a full cluster reboot until its first status write (normally seconds
+  after it starts), the last status it wrote counts, even if pods have failed
+  since. After a reboot, if the mode manager's reset to the default mode
+  changes nothing, because the ClusterMode was already in it, the generation
+  is unchanged, so a move on the old `Ready` is accepted in that window.
+- **Getting out of a stuck mode** (README): change to the default mode; if
+  that can't become Ready either, remove `transitions` from the definition;
+  with the controller down, a cluster admin can remove `status.transitions`
+  through the status subresource, which the controller copies back from the
+  definition when it next runs.
+- **StatefulSets and pods inside the count:** a StatefulSet counts a
+  terminating pod in `replicas`, and in `readyReplicas` while it is still
+  ready, so only pods above its count, or pods no longer ready, keep it
+  unsettled. A Deployment counts every terminating pod.
+- **A definition with no `defaultMode` rule, or an empty `transitions`
+  list,** is rejected (§5.3).
+- **Definition deleted, or `InvalidMode`:** `Ready` is False, so under
+  `transitions` only the default mode can be reached.
 
 ### 7.9 Workload kinds and KubeVirt
 
@@ -1020,8 +1117,8 @@ with one implementation per kind. Each implementation:
 
 | Kind | API | Count field | Largest count | Reached when |
 |---|---|---|---|---|
-| Deployment | `apps/v1` | `spec.replicas`, nil as 1 | int32 max | `status.observedGeneration` ≥ `metadata.generation`, and `status.replicas` and `status.readyReplicas` both equal `spec.replicas` |
-| StatefulSet | `apps/v1` | `spec.replicas`, nil as 1 | int32 max | as for Deployment |
+| Deployment | `apps/v1` | `spec.replicas`, nil as 1 | int32 max | `status.observedGeneration` ≥ `metadata.generation`, `status.replicas` and `status.readyReplicas` both equal `spec.replicas`, and `status.terminatingReplicas` is 0 where the cluster reports it |
+| StatefulSet | `apps/v1` | `spec.replicas`, nil as 1 | int32 max | `status.observedGeneration` ≥ `metadata.generation`, and `status.replicas` (which counts pods until they have gone) and `status.readyReplicas` both equal `spec.replicas` |
 | VirtualMachinePool | `pool.kubevirt.io`, the version the cluster prefers (`v1alpha1` today) | `spec.replicas`, nil as 1 | int32 max | `status.replicas` and `status.readyReplicas` both equal `spec.replicas` |
 | VirtualMachine | `kubevirt.io/v1` | `spec.runStrategy`: `Halted` is 0, any other value is 1 | 1 | On: `status.ready` is true. Off: `status.printableStatus` is `Stopped` |
 
@@ -1160,6 +1257,7 @@ test/
 config/
   crd/                            (generated)
   rbac/                           (controller, generated from markers; maintainer and viewer roles)
+  admission/                      (the transitions ValidatingAdmissionPolicy and its binding, §5.2)
   manager/
   default/
   samples/                        (example ClusterModeDefinition and ClusterMode)
@@ -1167,7 +1265,7 @@ config/
   argocd/argocd-cm-patch.yaml
   examples/app-deployment.yaml
   examples/argocd-application.yaml
-dist/chart/                       (Helm chart; CRDs and role rules synced from config/; §9.4)
+dist/chart/                       (Helm chart; CRDs, role rules and admission policy synced from config/; §9.4)
 hack/sync-chart.sh, test-chart.sh
 Makefile                          (Kubebuilder targets: manifests, generate, fmt, vet, test, build, docker-build)
 Dockerfile
@@ -1213,8 +1311,9 @@ This document is authoritative where the two differ.
 
 ### 9.4 Packaging: Helm now, OLM later
 
-v1 is installed with a Helm chart in `dist/chart/`. The CRDs and the rules of
-every role in it are copied from `config/` by `hack/sync-chart.sh`, which
+v1 is installed with a Helm chart in `dist/chart/`. The CRDs, the rules of
+every role and the admission policy in it are copied from `config/` by
+`hack/sync-chart.sh`, which
 `make manifests` runs, so they always match controller-gen's output; `make
 chart-check` fails in CI if they drift. The rest of the chart is maintained by
 hand. Kubebuilder's Helm plugin was the plan, but it only works with
@@ -1237,6 +1336,8 @@ The chart contains:
   the groups in `rbac.maintainers.groups` and `rbac.viewers.groups`
 - the mode-manager writer ClusterRole for the names in
   `modeManager.clusterModes` (§6.4)
+- the transitions ValidatingAdmissionPolicy and its binding (§5.2), which
+  aren't kept on uninstall; the CRD's own rules still apply without them
 - the definition admin ClusterRole (§5.6), with an optional binding for
   `rbac.definitionAdmins.groups`, and optionally ClusterModeDefinitions from
   the `definitions` value, so they are kept in Git with the rest of the
@@ -1421,6 +1522,16 @@ Write these first, because they prove the write-time check in §5.2:
 - After the controller has reconciled, `managedFields` shows `mode-manager` as
   the only owner of `spec.mode` and `spec.definition`, and `mode-operator` as
   the only owner of `status`.
+- Transitions: both suites install `config/admission/` and wait until the API
+  server enforces it. The CRDs reject a transition to or from a mode outside
+  `modes`, a rule with no `to`, a definition without a rule for
+  `defaultMode`, and an empty `transitions` list. A ClusterMode moves only
+  along the rules and only once Ready; the default mode is always reachable.
+  The admission policy rejects a move on a Ready status from before the last
+  change of mode (to the default mode and back), and accepts it once
+  `status.observedGeneration` has caught up. With the controller running, a
+  definition that drops its transitions clears `status.transitions` and
+  lifts the restrictions.
 
 ### Manual checklist (README)
 - Until the real mode manager is ready, use the stub (§9.5) to set modes for
@@ -1494,6 +1605,8 @@ None of these needs a breaking change.
 | A per-VM run strategy | An optional annotation, for example `mode.bitasylum.org/run-strategy: RerunOnFailure`, for VMs that should stay off after shutting themselves down. VMs without it keep `Always`. |
 | Limit what the controller can change | An optional ValidatingAdmissionPolicy (GA in Kubernetes 1.30) that lets the controller's ServiceAccount change only `spec.replicas`, `spec.runStrategy` and the `mode.bitasylum.org/` annotations of workloads. Its RBAC allows any patch, so this would contain a compromised controller. |
 | Other kinds, such as VirtualMachineInstanceReplicaSet | Another implementation of the per-kind interface (§7.9). |
+| Break-before-make transitions | A per-rule `strategy: BreakBeforeMake` on `transitions`. The status reconciler drives a phase stored in ClusterMode status: first only decreases are applied, then, once every one has finished (its pods gone), the increases. Open choices: whether pending scale-to-zero delays hold up the increases, whether to carry on after the settle timeout, and restarting the phases when the mode changes mid-way. Each workload's `terminationGracePeriodSeconds` (times its replicas for an OrderedReady StatefulSet) bounds how long its part takes. Ordered waves per workload would generalise it. |
+| An override for transitions | An annotation on the ClusterMode that skips the transition rules for one write, for emergencies. RBAC can't limit who sets an annotation, so restricting it to a group needs a ValidatingAdmissionPolicy. |
 | Delays on non-zero scale-downs, such as 6 to 3 | Add a separate optional annotation, for example `scale-down-delay`, with its own controller-owned pending marker. `scale-to-zero-delay` keeps its meaning, so existing workloads are unaffected. |
 | OLM distribution | Generate an Operator SDK bundle from `config/` and the `PROJECT` file. §9.4 lists the choices that keep this open. |
 
