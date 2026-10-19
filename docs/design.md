@@ -1377,6 +1377,12 @@ To keep OLM possible later without a redesign:
   it so that OLM can manage its certificates, as Operator SDK documents.
 - Release the image, chart and CRD together under one semantic version, which
   OLM's upgrade graph needs.
+- The Image workflow publishes `ghcr.io/bitasylum/mode-operator` for amd64
+  and arm64: `main` and `sha-<commit>` from every push to main (development
+  builds), and `<version>` and `<major>.<minor>` from `v<semver>` tags, which
+  must be on main. No `latest`. Each image has an SBOM, BuildKit provenance
+  and a signed GitHub attestation. Publishing the chart (for example as an
+  OCI artifact) is still to do.
 
 ### 9.5 Stub mode manager (`mode-manager-stub`)
 
