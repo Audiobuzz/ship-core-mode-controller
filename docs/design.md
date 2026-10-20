@@ -2,7 +2,37 @@
 
 Status: ready for implementation once the decisions in §2 are confirmed
 Audience: implementing agent (Claude Code) and reviewers
-Revision: v2, 2026-10-17. Replaces v1.
+Revision: v2.1, 2026-10-20. Replaces v2 (2026-10-17) and v1.
+
+## Changes in v2.1
+
+- **mode-operator ships a Go client library**, the module
+  `github.com/bitasylum/mode-operator/client` in `client/` (§6.5). It
+  implements the contract in §6.1 and the persistence design in §6.3, in
+  three packages the mode-manager team can take as much of as they want. The
+  mode manager may import that module and nothing else from mode-operator;
+  the CRDs are still the contract.
+- **An orchestration server also writes the mode** (§5.4). It powers physical
+  servers on and off through out-of-band management, writes `spec.mode` only,
+  with a field manager of its own, and never creates the ClusterMode. The mode
+  manager adopts its changes as it does a maintainer's.
+- **Clients take the rules from the ClusterMode's status** (§6.1, rule 3):
+  `status.modes`, `status.defaultMode` and `status.transitions`, which are
+  what the API server enforces. The definition is read only until the
+  controller has written them.
+- **Rule 9 is specified by resourceVersion**, so a stale event is never taken
+  for someone else's change, and changes are reported in the order they
+  happened.
+- **§6.3 is built**, with these changes: creating the ClusterMode emits
+  `ModeReset`; a missing definition starts in the ClusterMode's last copy of
+  the default mode; any read error other than NotFound stops startup; and the
+  fingerprint keeper rewrites the whole record.
+- **The mode manager's RBAC is trimmed** (§6.4): every verb on ClusterModes,
+  `create` included, is limited to its own ClusterMode, because server-side
+  apply creates by name; Nodes `list` and `watch`; and `create`, `get` and
+  `patch` on the fingerprint ConfigMap only.
+- **The stub uses the library** (§9.5), including §6.3, and its end-to-end
+  tests run it with mode-operator on a two-node kind cluster.
 
 ## Changes from v1
 
@@ -63,10 +93,13 @@ labels, RBAC and metrics are designed so that more mode managers, each with its
 own ClusterMode (for example per namespace or per group of applications), can
 be added later without breaking changes (§13).
 
-The `mode-operator` repo holds the controller and the CRDs. The mode manager
-is developed in another repo, and the ClusterMode CRD is the only interface between the two:
-neither imports the other's code. They run as separate Deployments with
-separate ServiceAccounts.
+The `mode-operator` repo holds the controller, the CRDs and a Go client
+library for them (§6.5). The mode manager is developed in another repo, and
+the ClusterMode CRD is the only interface between the two. mode-operator
+imports nothing from the mode manager; the mode manager may import the client
+library, which depends only on client-go. They run as separate Deployments
+with separate ServiceAccounts. A future orchestration server, which powers
+physical servers on and off as the mode changes, uses the same library.
 
 ## 2. Decisions to confirm before starting
 
@@ -91,6 +124,10 @@ Confirmed with the user:
   submodules of it, each with its own history, CI and releases.
 - The mode manager is developed in another repo. The ClusterMode CRD is its
   only interface with this project.
+- The mode manager and the orchestration server are both Go. mode-operator
+  ships a client library for them, in `client/` as its own module (§6.5).
+- The orchestration server writes `spec.mode` too, with its own field
+  manager, and the mode manager adopts its changes (§5.4).
 - The allowed modes are defined in a ClusterModeDefinition that only admins
   can change. Neither the mode manager nor mode-operator can write it.
 - The mode manager runs a single replica with no leader election. It may
@@ -158,9 +195,10 @@ Confirmed with the user:
   build or test it.
 - An OLM bundle. v1 ships a Helm chart, and nothing in the design blocks OLM
   later (§9.4).
-- Mode-manager code. This project specifies what the mode manager must do
-  (§6) but ships none of it. The stub in §9.5 is a test tool, not a mode
-  manager.
+- The mode manager itself. This project specifies what the mode manager must
+  do (§6), and ships a client library that implements that contract (§6.5),
+  but none of the mode manager's own logic. The stub in §9.5 is a test tool,
+  not a mode manager.
 - Maintainer overrides that outlast the mode manager's next mode change
   (§13).
 
@@ -192,10 +230,13 @@ Confirmed with the user:
 ```
 
 - Admins write ClusterModeDefinitions, through Git. The mode manager and the
-  controller only read them.
-- The mode manager writes its ClusterMode's `spec`, and maintainers may edit
-  `spec.mode` by hand (§5.4). The mode manager's fingerprint ConfigMap is
-  internal to it (§6.3), so it isn't shown.
+  controller only read them, and the mode manager reads one only until the
+  controller has copied its rules into the ClusterMode's status (§6.1,
+  rule 3).
+- The mode manager writes its ClusterMode's `spec`, and maintainers and the
+  orchestration server may change `spec.mode` (§5.4). The mode manager's
+  fingerprint ConfigMap is internal to it (§6.3), so it isn't shown, and
+  neither is the orchestration server.
 - The controller owns both CRDs. It is the only writer of every ClusterMode's
   `status` and of `spec.replicas` on opted-in workloads. It never writes
   ClusterMode `spec`.
@@ -435,6 +476,7 @@ Changing the list:
 | admin | ClusterModeDefinitions | Git, through ArgoCD, or the Helm chart's values (§9.4) | ArgoCD's or Helm's |
 | mode manager | `spec.mode`, `spec.definition` and the `mode.bitasylum.org/writer` label, on its own ClusterMode only | server-side apply with `Force: true` | `mode-manager` |
 | maintainer | `spec.mode`, by hand | `kubectl patch`, `edit` or `apply` | whatever the tool sets, for example `kubectl-patch` |
+| orchestration server | `spec.mode` only, on a ClusterMode that exists | server-side apply with `Force: true`, through the client library's `NewWriter` (§6.5) | its own, for example `orchestrator` |
 | controller | all of `status`, on every ClusterMode | merge patch on the status subresource | `mode-operator` |
 | anyone else | nothing (RBAC) | | |
 
@@ -446,6 +488,14 @@ Changing the list:
   lasts until the mode manager's own logic next changes the mode.
   In practice maintainers can change only `spec.mode`: `spec.definition`
   can't be changed once set, and they can't write the definition itself.
+- **The orchestration server** moves the cluster into a mode before powering
+  servers off, and out of it after powering them on. The mode manager treats
+  its changes like a maintainer's. It waits until the mode has settled
+  (`Ready` True for the current generation) before powering anything off,
+  and compares the nodes' boot IDs before and after to confirm a server
+  really restarted. Its role is `get`, `list`, `watch` and `patch` on its
+  ClusterMode, limited by `resourceNames`: no `create`, and no access to the
+  definition, because it reads the rules from the ClusterMode's status.
 - The `writer` label records which mode manager writes the object. It is how a
   human finds the gRPC endpoint that matches a ClusterMode, and it gives a
   future admission policy something to check (§13).
@@ -497,9 +547,11 @@ them. The README shows the override command:
 
 The mode manager is developed in another repo, and the ClusterMode CRD is its
 only interface with this project. This project ships none of the mode
-manager's code, and the mode manager imports no Go code from it. This section covers what the
-mode manager must do (§6.1), what it can rely on (§6.2), and a recommended
-design for its persistence (§6.3). Its gRPC API is unchanged; the changes the
+manager's code, but it does ship a Go client library that implements this
+contract (§6.5); the mode manager may import that module and nothing else from
+mode-operator. This section covers what the mode manager must do (§6.1), what
+it can rely on (§6.2), a recommended design for its persistence (§6.3), its
+RBAC (§6.4) and the library (§6.5). Its gRPC API is unchanged; the changes the
 contract needs are made in the mode manager's repo.
 
 ### 6.1 What the mode manager must do
@@ -519,12 +571,18 @@ contract needs are made in the mode manager's repo.
    fails while the CRD is installed, keep the previous mode, don't broadcast,
    and retry. This keeps workloads and gRPC subscribers on the same mode. If
    the CRD isn't installed, rule 8 applies instead.
-3. **Use only modes its definition allows.** Read the ClusterModeDefinition,
-   and check a mode against its `spec.modes` before writing it. The API server
-   also rejects a mode outside the definition (§5.2), so a mismatch shows up
+3. **Use only modes its definition allows.** Check a mode against the rules
+   before writing it. Take them from the ClusterModeDefinition's copies in the
+   ClusterMode's status, `status.modes`, `status.defaultMode` and
+   `status.transitions`: they're what the API server checks writes against,
+   and the mode manager shows users the modes they allow next. Read the
+   definition itself only while the copies are missing, before the
+   controller's first status write; after the definition is edited, the copies
+   catch up within seconds, and until then they are still what is enforced.
+   The API server rejects a mode outside them (§5.2), so a mismatch shows up
    as a failed write under rule 2, never as a wrong mode. The mode manager
    can't change the definition; §5.3 gives the order for adding and removing
-   modes. If the definition has `transitions`, move only along them, and only
+   modes. If there are transitions, move only along them, and only
    once the ClusterMode's `status.observedGeneration` equals its
    `metadata.generation`, `status.mode` is the current mode and its `Ready`
    condition is True. Plan paths of several steps as a series of such moves:
@@ -550,18 +608,25 @@ contract needs are made in the mode manager's repo.
    can't drift from it. Check through discovery whether `clustermodes` is
    served, at startup and then about once a minute. Once it is, write the
    current mode, which creates the ClusterMode.
-9. **Adopt maintainer edits.** Watch its ClusterMode. When `spec.mode` changes
-   to something other than the mode manager's current mode, take it as the
-   current mode and broadcast it over gRPC, without writing it back. Ignore
-   events where `spec.mode` already equals the current mode, which covers the
-   mode manager's own writes. Its own logic may change the mode again later,
-   as usual.
+9. **Adopt changes made by others**, a maintainer's or the orchestration
+   server's. Watch its ClusterMode. When `spec.mode` changes to something
+   other than the mode manager's current mode, take it as the current mode
+   and broadcast it over gRPC, without writing it back. An event counts only
+   if its `resourceVersion` is newer than that of the last change the mode
+   manager wrote or adopted (compared as Kubernetes compares resource
+   versions); otherwise an event from before its own write, delivered after
+   it, would undo the write. Events where `spec.mode` already equals the
+   current mode are ignored too. Broadcast changes in the order they
+   happened: the library reports each one, written or adopted, through
+   `Writer.OnChange` under the writer's lock. Its own logic may change the
+   mode again later, as usual.
 
 ### 6.2 What the mode manager can rely on
-- The controller never writes ClusterMode `spec`. Only the mode manager and
-  maintainers do (§5.4).
-- Nobody but admins changes the ClusterModeDefinition. The mode manager can
-  watch it to pick up changes, including its `transitions`.
+- The controller never writes ClusterMode `spec`. Only the mode manager,
+  maintainers and the orchestration server do (§5.4).
+- Nobody but admins changes the ClusterModeDefinition. The controller copies
+  its rules into the ClusterMode's status within seconds of a change, so
+  watching the ClusterMode picks up changes, including its `transitions`.
 - Under `transitions`, the API server rejects a move that isn't allowed yet,
   and the mode manager sees a failed write under rule 2. With the admission
   policy installed (§5.2), a Ready status counts only once it was computed
@@ -579,8 +644,8 @@ contract needs are made in the mode manager's repo.
 
 ### 6.3 Recommended persistence design
 
-This is not built in this project. It is the design reviewed for it,
-and the mode-manager team can adopt it as it stands.
+The client library's `fingerprint` and `startup` packages build this design
+(§6.5). The mode-manager team can use them, or build it from this section.
 
 #### Fingerprint ConfigMap
 
@@ -612,21 +677,25 @@ data:
 1. List Nodes and build the set of live, non-empty `status.nodeInfo.bootID`
    values.
 2. Get the ClusterMode, its ClusterModeDefinition, and the fingerprint
-   ConfigMap.
+   ConfigMap. A read that fails for any reason other than NotFound stops
+   startup, to be retried: taking it for a missing object would reset the
+   mode.
 3. Decide the mode. The first rule that matches wins:
 
    | Situation | Mode | Restored | Event on the ClusterMode |
    |---|---|---|---|
    | CRDs not installed | built-in default mode (`standby`) | no | none. Skip steps 4 and 5 and serve gRPC; once the CRDs appear, do steps 4 and 5 with the current mode (§6.1, rule 8) |
-   | ClusterModeDefinition not found | built-in default mode (`standby`) | no | Warning `DefinitionNotFound`; the ClusterMode reports it too |
-   | ClusterMode not found | the definition's default mode | no | none (created in step 4) |
+   | ClusterModeDefinition not found | the ClusterMode's `status.defaultMode`, the controller's last copy of the deleted definition's rules, which the API server still enforces; otherwise the built-in default mode | no | Warning `DefinitionNotFound`; the ClusterMode reports it too |
+   | ClusterMode not found | the definition's default mode | no | Normal `ModeReset` (created in step 4) |
    | stored `spec.mode` isn't in the definition, or isn't a mode the mode manager knows | the definition's default mode | no | Warning `InvalidStoredMode` |
-   | ConfigMap missing, or it has no bootIDs | the definition's default mode | no | Normal `ModeReset` |
+   | ConfigMap missing, it has no bootIDs, or it is for another ClusterMode | the definition's default mode | no | Normal `ModeReset` |
    | at least one stored bootID is in the live set | stored `spec.mode` | yes | Normal `ModeRestored` |
    | no stored bootID is in the live set | the definition's default mode | no | Normal `ModeReset` (full cluster reboot) |
 
    An overlap means at least one node stayed up, so this was not a full
-   cluster reboot.
+   cluster reboot. If the definition's default mode isn't one the mode
+   manager knows, "the definition's default mode" means its built-in default
+   instead (§14).
 4. Server-side apply the ClusterMode: `spec.mode`, `spec.definition` and the
    `writer` label. This creates the object if it is missing.
 5. Only then, server-side apply the fingerprint ConfigMap with the live set,
@@ -645,8 +714,11 @@ Keep the decision in step 3 a pure function, so the table can be unit-tested.
 - Run an informer on Nodes with a transform that keeps only the node name and
   `status.nodeInfo.bootID`, to save memory. A metadata-only informer can't be
   used, because the bootID is in `status`.
-- On a Node add, delete, or `bootID` change, debounce by about 2s, then rewrite
-  `bootIDs` and `updatedAt`. Skip the write if the set hasn't changed.
+- On a Node add, delete, or `bootID` change, wait about 2s from the first
+  change, without extending the wait for later ones, then rewrite the whole
+  record with the new `bootIDs` and `updatedAt`. A server-side apply that
+  left out `lastStartupAt` and `restoredOnStartup` would remove them. Skip
+  the write if the set hasn't changed.
 - Rolling reboots therefore never trigger a reset: each returning node's new
   bootID is recorded while the manager runs.
 - If refreshing fails, log the error and retry. A stale fingerprint only
@@ -668,21 +740,86 @@ chart's values (`default` in v1), because they belong to the CRD. The mode
 manager's own chart binds its ServiceAccount to that role and grants the rest.
 
 From mode-operator's chart:
-- `clustermodes`: `create` (Kubernetes can't limit `create` by name), and
-  `get`, `list`, `watch`, `update`, `patch` limited by `resourceNames` to its
-  own ClusterMode. To list or watch one named object under `resourceNames`,
-  the request must use a `metadata.name` field selector.
+- `clustermodes`: `create`, `get`, `list`, `watch`, `update`, `patch`, all
+  limited by `resourceNames` to its own ClusterMode. A plain create can't be
+  limited by name, because the name isn't in its URL, but a server-side
+  apply that creates the object is authorized as a create of that name, and
+  rule 1 creates the ClusterMode that way; a plain create is refused. To list
+  or watch one named object under `resourceNames`, the request must use a
+  `metadata.name` field selector.
 - no access to `clustermodes/status`
 - `clustermodedefinitions`: `get`, `list`, `watch`, and no write access
 
 From the mode manager's chart:
 - `events` (core) in the `default` namespace, where Kubernetes records events
   about cluster-scoped objects: `create`, `patch`
-- for §6.3: `configmaps` in its own namespace (`create`, and `get`, `update`,
-  `patch` limited by `resourceNames` to the fingerprint ConfigMap), and
-  `nodes` (`get`, `list`, `watch`)
+- for §6.3: `configmaps` in its own namespace (`create`, `get` and `patch`,
+  limited by `resourceNames` to the fingerprint ConfigMap, which the library
+  creates with server-side apply), and `nodes` (`list`, `watch`)
 - `leases` in its own namespace, only once it becomes HA: `get`, `list`,
   `watch`, `create`, `update`, `patch`, `delete`
+
+### 6.5 Client library (`client/`)
+
+The contract in §6.1 is easy to get subtly wrong: which fields every apply
+sends, `Force`, the generation check, telling one's own writes from others',
+the CRDs coming and going. mode-operator therefore ships one tested
+implementation, the module `github.com/bitasylum/mode-operator/client`, for
+the mode manager and the orchestration server, which are both Go.
+
+- **Its own module** in `client/`, depending only on `k8s.io/api`,
+  `apimachinery`, `client-go`, `klog` and `k8s.io/utils`. It needs Go 1.26 and
+  client-go 0.37 or later. It doesn't import mode-operator's API types or
+  controller-runtime, and works on unstructured objects through the dynamic
+  client, converted into its own structs that carry only the fields §5.5
+  keeps stable. mode-operator's Makefile sets `GOWORK=off`, so a workspace
+  never leaks into its builds. Releases are tagged `client/vX.Y.Z`.
+- **Three packages,** so the mode-manager team can take as much as they want:
+
+  | Package | Does | Depends on |
+  |---|---|---|
+  | `clustermode` | the CRD interface: read, watch, write, plan and move | client-go |
+  | `fingerprint` | boot IDs: take, compare, store in a ConfigMap, keep current | client-go |
+  | `startup` | the decision table and write order of §6.3 | both |
+
+- **`clustermode`:**
+  - `Reader`: `Available` (discovery), `Get`, `Rules` (the status copies,
+    falling back to the definition, rule 3), `Watch`, `WaitFor` and
+    `WaitSettled`. `Watch` is an informer limited to the ClusterMode by a
+    `metadata.name` field selector, which a `resourceNames` role allows
+    (§6.4). Its first list is a quorum read, so the first event is never
+    older than a write made just before it. It reports a missing ClusterMode
+    once the cache has synced, and ends with `NotInstalled` when the CRDs go.
+  - `NewModeManagerWriter` follows rule 1: field manager `mode-manager`, all
+    three fields in every apply, and creating the ClusterMode.
+    `NewWriter(fieldManager)` is for other writers, such as the orchestration
+    server: `spec.mode` only, and never create.
+  - `Check`, `Set` (check, then write) and `Apply` (write, and let the API
+    server decide). Errors carry a reason: `NotInstalled`, `NotFound`,
+    `DefinitionNotFound`, `RulesUnavailable`, `UnknownMode`,
+    `TransitionNotAllowed`, `NotSettled`, `NoPath`, `Interrupted`,
+    `Forbidden`, `Rejected` and `DefinitionMismatch`. A rejection is
+    classified by re-reading the ClusterMode, never by parsing the API
+    server's message.
+  - `MoveTo` plans the shortest path along the transitions (ties broken by
+    the order of `modes`), and waits for each mode to settle before leaving
+    it, except into the default mode, which is always allowed. It calls back
+    after each step so the mode manager can broadcast it (rule 2), and stops
+    with `Interrupted` if someone else changes the mode.
+  - `Observe` and `OnChange` implement rule 9.
+- **`fingerprint`:** `Take`, `Overlap` and `Compare` (rebooted, unchanged,
+  gone, added), which the orchestration server uses around a power cycle;
+  `Store`, the ConfigMap in §6.3 written with server-side apply; and
+  `Keeper`, the informer that keeps it current.
+- **`startup`:** `Decide` is the pure table in §6.3; `Run` does the steps in
+  order; `Persist` writes the mode once the CRDs appear (rule 8); and
+  `NewRecorder` records events in `default`.
+- **Tests:** unit tests with fake clients and a fake clock, and integration
+  tests in `client/integration`, a module of their own so that envtest and
+  controller-runtime stay out of the library's `go.mod`. They run the real
+  CRDs, the admission policy and the roles from `config/` against envtest's
+  API server, as users bound to those roles, so RBAC is enforced. The stub
+  (§9.5) runs the library with mode-operator on a kind cluster.
 
 ## 7. Controller
 
@@ -1226,8 +1363,13 @@ devcontainer, this document and the prototype for reference, and has the other
 two as git submodules. `mode-operator` holds the controller (§9.1 to §9.4), and
 `mode-manager-stub` holds a test stand-in for the mode manager (§9.5). Each
 submodule builds, tests and releases on its own, with nothing from the parent.
-Once both contain Go modules, a `go.work` in the parent lets editor tooling see
-both in one window.
+The parent has no `go.work`: Go finds one in any parent directory, so it would
+change which library version mode-operator and the stub build against. The
+stub has its own, ignored by git, for building against a local library
+checkout (§9.5).
+
+Each submodule holds only what its users need: code, a README, godoc, and
+build and CI files. Design rationale stays in this document.
 
 ### 9.1 mode-operator layout (Kubebuilder go/v4)
 
@@ -1262,6 +1404,10 @@ internal/
     virtualmachinepool.go         (unstructured)
 test/
   crds/kubevirt/                  (minimal stand-in KubeVirt CRDs for envtest)
+client/                           (module github.com/bitasylum/mode-operator/client, §6.5)
+  clustermode/  fingerprint/  startup/
+  integration/                    (module of its own: envtest suites, and testenv helpers)
+  README.md
 config/
   crd/                            (generated)
   rbac/                           (controller, generated from markers; maintainer and viewer roles)
@@ -1280,8 +1426,12 @@ Dockerfile
 README.md
 ```
 
-- `config/mode-manager/rbac/` is the only mode-manager artifact in mode-operator:
-  the ClusterMode permissions its install needs (§6.4).
+- `config/mode-manager/rbac/` and `client/` are the only mode-manager
+  artifacts in mode-operator: the ClusterMode permissions its install needs
+  (§6.4), and the library (§6.5).
+- `make test-client` runs the library's unit and integration tests, and
+  `lint`, `vulncheck` and Dependabot cover all three modules. The image
+  leaves out `client/`.
 
 ### 9.2 Scaffolding
 
@@ -1386,39 +1536,125 @@ To keep OLM possible later without a redesign:
 
 ### 9.5 Stub mode manager (`mode-manager-stub`)
 
-A small test tool in its own repo. It stands in for the real mode manager so
-that mode-operator can be exercised end to end. It meets the parts of the
-contract in §6.1 that the operator relies on, and nothing more.
+A test tool in its own repo, module `github.com/bitasylum/mode-manager-stub`.
+It stands in for the real mode manager so that mode-operator can be exercised
+end to end, and it is the reference consumer of the client library (§6.5): it
+does everything through the library, as the real mode manager would.
 
-- **Web page.** One page, served with Go's `net/http` and `html/template`,
-  with no JavaScript framework. It shows:
-  - a select box listing the definition's `spec.modes`; choosing one writes
-    `spec.mode`
-  - the current `spec.mode` and `status.modeSetBy`, refreshed when they
-    change, so a maintainer's manual edit shows up (rule 9)
-  - the ClusterMode's conditions, workload counts, replica sums and
-    unsettled list
-  - a free-text field that writes any mode, to check that the API server
-    rejects modes outside the definition (§5.2). API errors are shown as
-    returned.
-- **Writes** follow rules 1 and 4: server-side apply with field manager
-  `mode-manager` and `Force: true`, setting `spec.mode`, `spec.definition`
-  and the `writer` label (`mode-manager-stub`). It creates the ClusterMode if
-  it's missing, and never writes `status`.
-- **Flags:** the ClusterMode name (default `default`), the definition name
-  (default `standard`) and the listen address.
-- **Generic objects only.** It uses client-go's dynamic client, not
-  mode-operator's Go types, so it uses the CRDs exactly as the real mode
-  manager will, and neither repo depends on the other.
-- **If the CRDs are missing,** the page says so and keeps checking (rule 8).
-- **Left out on purpose:** gRPC, the persistence design in §6.3, and leader
-  election. It runs one replica with `strategy: Recreate` (rule 5).
+- **Behaviour:**
+  1. On start, `startup.Run` decides the mode (§6.3), retrying with backoff.
+  2. Without the CRDs, it holds the mode in memory, checks discovery at
+     `--discovery-interval`, and calls `startup.Persist` once they appear
+     (rule 8).
+  3. While running, a `fingerprint.Keeper` keeps the fingerprint current, and
+     every watch event goes to `Writer.Observe`. Changes by others are
+     adopted through `OnChange` and never written back (rule 9).
+  4. If the ClusterMode is deleted, it writes the current mode again,
+     retrying with backoff until it's back. If the CRDs are removed, it goes
+     back to step 2.
+
+  A mode set while the CRDs are missing must be a valid mode name, and in
+  `--known-modes` if that is set: nothing else checks it before it is
+  written. Mode changes, the start of a move and the switches between phases
+  are serialized, so the mode written when the CRDs appear is the one held
+  last. Changes are refused while starting and while a move runs. A move
+  waits at most `--move-step-timeout` (10 minutes) for each mode to settle,
+  and `DELETE api/move` stops it. If the mode is written once the CRDs appear
+  but the fingerprint isn't, the stub doesn't write the mode again, which
+  would undo changes made meanwhile: the keeper saves the fingerprint, with
+  its own retries.
+- **Web page and JSON API,** served with `net/http` and embedded static
+  files, with no JavaScript framework and relative URLs, so it also works
+  through the API server's service proxy. The page offers the modes the rules
+  allow next (`Writer.Set`), a move in as many steps as the transitions need
+  (`Writer.MoveTo`, in the background), and a free-text write that leaves
+  the checking to the API server (`Writer.Apply`). It shows the ClusterMode's
+  status, the startup decision, the last adopted change and the fingerprint.
+  The API is `GET api/state`, `POST api/mode {mode, check}` and
+  `POST api/move {target}`; a refused change answers with the library's
+  reason, and a change while busy or starting with 409.
+- **Flags:** `--cluster-mode`, `--definition`, `--writer-label`,
+  `--builtin-default`, `--known-modes`, `--namespace`,
+  `--fingerprint-configmap`, `--discovery-interval`, `--debounce`,
+  `--move-step-timeout`, `--listen` and `--kubeconfig`, checked at startup so
+  a value the API server would refuse doesn't leave the stub retrying. The
+  chart sets them from values, except four: the
+  namespace is the release's, the fingerprint ConfigMap's name follows from
+  the ClusterMode's (so its Role can name it), the listen address is the
+  container port, and the in-cluster config replaces a kubeconfig. A values
+  schema rejects malformed durations and names, and a role to bind that
+  isn't a `clustermode-writer`.
+- **Left out on purpose:** gRPC and leader election. It runs one replica with
+  `strategy: Recreate` (rule 5).
 - **Test clusters only.** The page has no login. Its Service is ClusterIP,
-  reached with `kubectl port-forward`; never expose it through an Ingress.
-- **RBAC:** its ServiceAccount is bound to the writer ClusterRole from
-  mode-operator's chart (§6.4), which already includes read access to
-  ClusterModeDefinitions. It needs nothing else.
-- **Packaging:** a distroless, non-root image and a small Helm chart.
+  reached with `kubectl port-forward` or the API server's service proxy;
+  never expose it through an Ingress.
+  - A NetworkPolicy, on by default, denies all ingress except from the peers
+    in `networkPolicy.from`. Port-forward isn't affected, and a NetworkPolicy
+    can't block the pod's own node, which kubelet's probes need. On a
+    single-node cluster that includes the API server; on more nodes, the
+    service proxy needs the API server's addresses listed, which depend on
+    the network plugin. It needs a network plugin that enforces
+    NetworkPolicy, as kind's does.
+  - POSTs must be `application/json`, and Go's `CrossOriginProtection`
+    refuses cross-origin ones, so a page on another site can't change the
+    mode through a tester's port-forward.
+  - Responses carry a strict Content-Security-Policy, and request bodies are
+    limited to 4 KiB.
+- **RBAC:** the ServiceAccount is bound to mode-operator's writer ClusterRole
+  (§6.4), and the stub's chart grants the rest of §6.4.
+- **Packaging:** a distroless, non-root image built for amd64 and arm64, and
+  a small Helm chart. The Image workflow publishes
+  `ghcr.io/bitasylum/mode-manager-stub` the same way as mode-operator's
+  (§9.4).
+- **Building against the library:**
+  - `go.mod` pins the library to a mode-operator commit, or later a
+    `client/vX.Y.Z` tag, and CI builds and tests against that. `make
+    check-no-replace` keeps `replace` directives out of `go.mod`.
+  - For local work, `make workspace` writes a `go.work`, ignored by git, that
+    uses `../mode-operator/client`. `make docker-build` then passes the
+    library as a named build context: the Dockerfile has an empty `library`
+    stage that the context overrides, and it runs `go work init` only when
+    the library is there.
+  - `make verify-published` builds and tests with `GOWORK=off`, as CI does.
+    `make docker-build` labels the image with the library it has, and `make
+    docker-push` refuses an image built against a local checkout.
+- **Unit tests** run the manager on client-go's fake clients: the CRDs
+  removed and reinstalled with a mode set in between, a deleted ClusterMode
+  recreated after a failed attempt, a failed fingerprint save once the CRDs
+  appear, a move stopped and one timed out, the checks on changes, and a
+  snapshot with no nulls for the page. The flags are checked too.
+- **End-to-end tests** (`make test-e2e`) create a two-node kind cluster with
+  a kubeconfig of their own, and build mode-operator's image and chart from
+  `../mode-operator` or, in CI, a clone of the commit `go.mod` pins. The
+  script refuses to run if a cluster of that name exists, and marks the
+  cluster it creates with a random run ID; the tests refuse to run unless the
+  kubeconfig's context is that cluster's and it carries the ID. Helm's and
+  kubectl's own settings that could point elsewhere are ignored. Ginkgo
+  specs, in order:
+  1. Before the CRDs exist, the stub holds the mode in memory.
+  2. A pod in another namespace can't connect to the stub, while the API
+     server's service proxy can.
+  3. Once mode-operator and the definition are installed, it writes the mode
+     and the fingerprint.
+  4. A missing ClusterMode is created in the default mode, with `ModeReset`.
+  5. A mode change scales the test workload.
+  6. A transition the rules don't allow is refused, with and without the
+     check, and a move goes through the intermediate mode.
+  7. A maintainer's `kubectl patch` is adopted and not written back.
+  8. A change by another writer is adopted: the test impersonates a
+     ServiceAccount with the orchestration server's role (§5.4) and uses
+     `NewWriter`, as the orchestration server will.
+  9. A deleted ClusterMode is written again in the current mode.
+  10. With the ClusterMode CRD deleted, the stub holds a mode set meanwhile,
+      and writes it once a `helm upgrade` has put the CRD back.
+  11. A restart keeps the mode, with `ModeRestored`.
+  12. A full reboot resets to the default mode. kind nodes share the host's
+      boot ID, so the test rewrites the stored boot IDs instead.
+
+  Each kind node uses inotify instances from one per-user limit, so with
+  other kind clusters running, `fs.inotify.max_user_instances` needs to be
+  512 or more; the script warns when it is lower.
 
 ## 10. Tech stack
 
@@ -1432,6 +1668,9 @@ contract in §6.1 that the operator relies on, and nothing more.
   work
 - KubeVirt kinds are handled as unstructured objects. Don't import
   `kubevirt.io/api`.
+- The client library (§6.5) depends only on the k8s.io libraries; its
+  integration tests use envtest and controller-runtime in a module of their
+  own. The stub's end-to-end tests use Ginkgo and Gomega, and kind.
 - No other new dependencies. The gRPC and protobuf dependencies are removed.
 
 ## 11. Testing
@@ -1547,6 +1786,24 @@ Write these first, because they prove the write-time check in §5.2:
   definition that drops its transitions clears `status.transitions` and
   lifts the restrictions.
 
+Client library (`client/integration`, as users bound to the roles from
+`config/`, with the test writing status in the controller's place):
+- The mode manager's writer creates the ClusterMode with all three fields,
+  owned by `mode-manager`. Another writer can't create it, owns `spec.mode`
+  after its write, and `mode-manager` takes it back.
+- A viewer and another writer get the rules from the ClusterMode alone.
+  `Rules` falls back to the definition before the first status write, and
+  reports `RulesUnavailable` when it may not read the definition. After a
+  definition edit, `Check` follows the status copy until it catches up.
+- The watch works under `resourceNames`, and ends when the CRDs go.
+- Each pre-check reason, including `NotSettled` from the admission policy; a
+  raw rejection classified by re-reading; `MoveTo` in two steps, and
+  interrupted by a maintainer's patch; `WaitSettled`.
+- The fingerprint store and keeper on Nodes with boot IDs.
+- The startup write order: a user who may not patch the ConfigMap makes `Run`
+  fail after resetting the ClusterMode, and a second `Run` still decides a
+  full reboot.
+
 ### Manual checklist (README)
 - Until the real mode manager is ready, use the stub (§9.5) to set modes for
   these checks.
@@ -1592,6 +1849,9 @@ Write these first, because they prove the write-time check in §5.2:
       listed under "Remove" in §9.3 is gone.
 - [ ] Nothing in mode-operator imports mode-manager code; the CRDs are the only
       interface §6 relies on.
+- [ ] `make test-client` passes, the client module's `go.mod` has nothing
+      beyond the k8s.io libraries, and the stub's `make test-e2e` passes
+      against the library version its `go.mod` pins.
 - [ ] The README documents the workload contract, the mode-manager contract,
       how to add and remove modes, maintainer overrides, ClusterMode status
       and conditions, ArgoCD setup,
@@ -1609,9 +1869,9 @@ None of these needs a breaking change.
 |---|---|
 | More mode managers, each with its own ClusterMode | Deploy another mode manager that meets §6.1, with its own ClusterMode name, using a shared or its own ClusterModeDefinition, and its own fingerprint ConfigMap if it uses §6.3. No controller change. |
 | Mode manager with more than one replica | Leader election with a Lease; only the leader writes. The contract already requires one writer at a time (§6.1, rule 5), so nothing in mode-operator changes. |
-| Mode manager moves into this project | Turn the design in §6.3 into a shared Go package at that point. |
+| Mode manager moves into this project | The client library already implements §6.1 and §6.3 (§6.5); the mode manager's own code moves in beside it. |
 | Maintainer override that lasts until cleared | An annotation on the ClusterMode, for example `mode.bitasylum.org/hold: "true"`, that tells the mode manager not to write until it is removed. The controller doesn't change. |
-| Strictly one mode manager per ClusterMode | An admin creates the ClusterMode objects, possibly from Git with Argo ignoring `spec.mode` through `managedFieldsManagers: [mode-manager]`. The mode managers lose `create`, so `resourceNames` alone enforces one mode manager per object. Alternatively, an admission policy checks the `writer` label against the requesting ServiceAccount. |
+| Strictly one mode manager per ClusterMode | The writer role already limits `create` by name (§6.4), so a mode manager can create and write only the ClusterModes its role names. Binding each mode manager to a role that names only its own ClusterModes gives one mode manager per object. To enforce that rather than rely on the bindings, an admission policy checks the `writer` label against the requesting ServiceAccount. |
 | A mode manager confined to one namespace | Add a namespaced `Mode` kind and a label `mode.bitasylum.org/mode` that resolves in the workload's namespace. |
 | A ClusterMode refusing workloads outside its scope | Add optional `spec.allowedNamespaces`. Workloads outside it get a Warning and are left unchanged. |
 | Protect definitions in use | A finalizer that blocks deleting a ClusterModeDefinition while a ClusterMode uses it. |
@@ -1634,3 +1894,8 @@ Each has a v1 default to use until it is answered.
    workloads and gRPC subscribers stay on the same mode (§6.1, rule 2).
 2. For the mode-manager team: should a long outage with no reboot also reset
    to `standby`? v1 default: no.
+3. For the mode-manager team: if the definition's default mode isn't one the
+   mode manager knows (the library's `KnownModes`), what should it start in?
+   v1 default: its built-in default mode. If the definition doesn't have that
+   mode either, the API server rejects the write, and startup retries until
+   the definition or the mode manager changes.
