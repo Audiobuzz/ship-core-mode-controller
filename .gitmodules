@@ -3,4 +3,4 @@
 	url = ../../bitasylum/mode-operator.git
 [submodule "mode-manager-stub"]
 	path = mode-manager-stub
-	url = ../mode-manager-stub.git
+	url = ../../bitasylum/mode-manager-stub.git
